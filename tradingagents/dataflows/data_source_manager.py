@@ -1321,38 +1321,67 @@ class DataSourceManager:
             return f"❌ AKShare获取{symbol}数据失败: {e}"
 
     def _get_baostock_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> str:
-        """使用BaoStock获取多周期数据 - 包含技术指标计算"""
-        # 使用BaoStock的统一接口
-        from .providers.china.baostock import get_baostock_provider
-        provider = get_baostock_provider()
-
-        # 使用异步方法获取历史数据
-        import asyncio
+        """使用BaoStock获取多周期数据 - 完全隔离在线程中执行，避免事件循环问题"""
+        logger.debug(f"📊 [BaoStock] 调用参数: symbol={symbol}, start_date={start_date}, end_date={end_date}, period={period}")
+        
+        start_time = time.time()
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            # 在线程池中没有事件循环，创建新的
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # 🔧 使用concurrent.futures在线程池中执行，完全隔离事件循环
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+            
+            def _fetch_baostock(bs_symbol, bs_start_date, bs_end_date):
+                """在线程中执行BaoStock调用（使用函数参数而不是闭包变量）"""
+                try:
+                    from .providers.china.baostock import get_baostock_provider
+                    import asyncio
+                    provider = get_baostock_provider()
+                    # 在新线程中创建新的事件循环
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        data = loop.run_until_complete(provider.get_historical_data(bs_symbol, bs_start_date, bs_end_date, period))
+                        stock_info = loop.run_until_complete(provider.get_stock_basic_info(bs_symbol))
+                        return (data, stock_info)
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    return e
+            
+            # 使用线程池执行，设置超时
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch_baostock, symbol, start_date, end_date)
+                try:
+                    result = future.result(timeout=30)  # 30秒超时
+                except FutureTimeoutError:
+                    logger.error(f"❌ [BaoStock] 调用超时: {symbol}")
+                    return f"❌ BaoStock获取{symbol}数据失败: 超时"
+            
+            # 检查是否是异常
+            if isinstance(result, Exception):
+                raise result
+            
+            data, stock_info = result
 
-        data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date, period))
+            if data is not None and not data.empty:
+                # 🔧 修复：使用统一的格式化方法，包含技术指标计算
+                stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
-        if data is not None and not data.empty:
-            # 🔧 修复：使用统一的格式化方法，包含技术指标计算
-            # 获取股票基本信息
-            stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
-            stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
-
-            # 调用统一的格式化方法（包含技术指标计算）
-            result = self._format_stock_data_response(data, symbol, stock_name, start_date, end_date)
-
-            logger.info(f"✅ [BaoStock] 已计算技术指标: MA5/10/20/60, MACD, RSI, BOLL")
-            return result
-        else:
-            return f"❌ 未能获取{symbol}的股票数据"
+                # 调用统一的格式化方法（包含技术指标计算）
+                result = self._format_stock_data_response(data, symbol, stock_name, start_date, end_date)
+                
+                duration = time.time() - start_time
+                logger.info(f"✅ [BaoStock-sync] 成功获取数据: {symbol} ({len(data)}条, {len(result)}字符, 耗时{duration:.2f}s)")
+                logger.info(f"✅ [BaoStock] 已计算技术指标: MA5/10/20/60, MACD, RSI, BOLL")
+                return result
+            else:
+                duration = time.time() - start_time
+                logger.warning(f"⚠️ [BaoStock-sync] 数据为空: {symbol}, 耗时={duration:.2f}s")
+                return f"❌ 未能获取{symbol}的股票数据"
+                
+        except Exception as e:
+            duration = time.time() - start_time
+            logger.error(f"❌ [BaoStock-sync] 调用失败: {e}, 耗时={duration:.2f}s", exc_info=True)
+            return f"❌ BaoStock获取{symbol}数据失败: {e}"
 
     # TDX 数据获取方法已移除
     # def _get_tdx_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> str:
@@ -2162,8 +2191,15 @@ def get_china_stock_data_unified(symbol: str, start_date: str, end_date: str) ->
     manager = get_data_source_manager()
     logger.info(f"🔍 [股票代码追踪] 调用 manager.get_stock_data，传入参数: symbol='{symbol}', start_date='{start_date}', end_date='{end_date}'")
     result = manager.get_stock_data(symbol, start_date, end_date)
+    
+    # 🔧 修复：处理可能的tuple返回值
+    if isinstance(result, tuple):
+        result = result[0]
+    if result is not None and not isinstance(result, str):
+        result = str(result) if result else None
+    
     # 分析返回结果的详细信息
-    if result:
+    if result and isinstance(result, str):
         lines = result.split('\n')
         data_lines = [line for line in lines if '2025-' in line and symbol in line]
         logger.info(f"🔍 [股票代码追踪] 返回结果统计: 总行数={len(lines)}, 数据行数={len(data_lines)}, 结果长度={len(result)}字符")

@@ -12,10 +12,50 @@ PDF 导出需要额外工具:
 import logging
 import os
 import tempfile
+import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# -------------------------------
+# wkhtmltopdf discovery helpers
+# -------------------------------
+def _resolve_wkhtmltopdf_path() -> Optional[str]:
+    """
+    Resolve wkhtmltopdf executable path.
+
+    Priority:
+    1) WKHTMLTOPDF_PATH / WKHTMLTOPDF env var
+    2) PATH lookup (shutil.which)
+    3) Common macOS paths (Homebrew Intel/Apple Silicon)
+    """
+    candidates = []
+
+    env_path = os.getenv("WKHTMLTOPDF_PATH") or os.getenv("WKHTMLTOPDF")
+    if env_path:
+        candidates.append(env_path)
+
+    which_path = shutil.which("wkhtmltopdf")
+    if which_path:
+        candidates.append(which_path)
+
+    candidates.extend([
+        "/opt/homebrew/bin/wkhtmltopdf",  # Apple Silicon Homebrew
+        "/usr/local/bin/wkhtmltopdf",     # Intel Homebrew
+        "/usr/bin/wkhtmltopdf",
+    ])
+
+    for p in candidates:
+        if not p:
+            continue
+        try:
+            if os.path.exists(p) and os.access(p, os.X_OK):
+                return p
+        except Exception:
+            continue
+
+    return None
 
 # 检查依赖是否可用
 try:
@@ -41,18 +81,28 @@ except ImportError as e:
 # 检查 pdfkit（唯一的 PDF 生成工具）
 PDFKIT_AVAILABLE = False
 PDFKIT_ERROR = None
+PDFKIT_CONFIG = None
+WKHTMLTOPDF_PATH = None
 
 try:
     import pdfkit
     # 检查 wkhtmltopdf 是否安装
     try:
-        pdfkit.configuration()
+        WKHTMLTOPDF_PATH = _resolve_wkhtmltopdf_path()
+        if WKHTMLTOPDF_PATH:
+            PDFKIT_CONFIG = pdfkit.configuration(wkhtmltopdf=WKHTMLTOPDF_PATH)
+        else:
+            PDFKIT_CONFIG = pdfkit.configuration()
         PDFKIT_AVAILABLE = True
         logger.info("✅ pdfkit + wkhtmltopdf 可用（PDF 生成工具）")
+        if WKHTMLTOPDF_PATH:
+            logger.info(f"   wkhtmltopdf: {WKHTMLTOPDF_PATH}")
     except Exception as e:
         PDFKIT_ERROR = str(e)
         logger.warning("⚠️ wkhtmltopdf 未安装，PDF 导出功能不可用")
         logger.info("💡 安装方法: https://wkhtmltopdf.org/downloads.html")
+        logger.info("💡 macOS (Homebrew): brew install --cask wkhtmltopdf")
+        logger.info("💡 或设置环境变量 WKHTMLTOPDF_PATH=/path/to/wkhtmltopdf")
 except ImportError:
     logger.warning("⚠️ pdfkit 未安装，PDF 导出功能不可用")
     logger.info("💡 安装方法: pip install pdfkit")
@@ -627,7 +677,12 @@ pre, code {
         }
 
         # 生成 PDF
-        pdf_bytes = pdfkit.from_string(html_content, False, options=options)
+        pdf_bytes = pdfkit.from_string(
+            html_content,
+            False,
+            options=options,
+            configuration=PDFKIT_CONFIG
+        )
 
         logger.info(f"✅ pdfkit PDF 生成成功，大小: {len(pdf_bytes)} 字节")
         return pdf_bytes
@@ -643,6 +698,9 @@ pre, code {
                 "安装方法:\n"
                 "1. 安装 pdfkit: pip install pdfkit\n"
                 "2. 安装 wkhtmltopdf: https://wkhtmltopdf.org/downloads.html\n"
+                "   macOS (Homebrew): brew install --cask wkhtmltopdf\n"
+                "3. （可选）显式指定 wkhtmltopdf 路径:\n"
+                "   export WKHTMLTOPDF_PATH=/path/to/wkhtmltopdf\n"
             )
             if PDFKIT_ERROR:
                 error_msg += f"\n错误详情: {PDFKIT_ERROR}"

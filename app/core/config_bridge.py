@@ -53,14 +53,16 @@ def bridge_config_to_env():
         bridged_count += 1
 
         # 1. 桥接大模型配置（基础 API 密钥）
-        # 🔧 [优先级] .env 文件 > 数据库厂家配置
-        # 🔥 修改：从数据库的 llm_providers 集合读取厂家配置，而不是从 JSON 文件
-        # 只有当环境变量不存在或为占位符时，才使用数据库中的配置
+        # 🔧 [优先级] 数据库厂家配置（Web后台） > .env 环境变量
+        # 说明：
+        # - 线上/本地临时配置经常先在 Web UI 里更新；如果 .env 里残留旧 Key，会导致运行时仍用旧 Key。
+        # - 这里会对 env/db 两侧的 Key 做基本有效性校验（排除占位符/截断等），再决定来源。
         try:
             # 使用同步 MongoDB 客户端读取厂家配置
             from pymongo import MongoClient
             from app.core.config import settings
             from app.models.config import LLMProvider
+            from app.utils.api_key_utils import is_valid_api_key
 
             # 创建同步 MongoDB 客户端
             client = MongoClient(settings.MONGO_URI)
@@ -81,17 +83,32 @@ def bridge_config_to_env():
                 env_key = f"{provider.name.upper()}_API_KEY"
                 existing_env_value = os.getenv(env_key)
 
-                # 检查环境变量是否已存在且有效（不是占位符）
-                if existing_env_value and not existing_env_value.startswith("your_"):
-                    logger.info(f"  ✓ 使用 .env 文件中的 {env_key} (长度: {len(existing_env_value)})")
+                db_key_valid = is_valid_api_key(provider.api_key)
+                env_key_valid = is_valid_api_key(existing_env_value)
+
+                # 若数据库明确标记 source=environment 且 env_key 有效，则尊重环境变量
+                source = None
+                try:
+                    source = (provider.extra_config or {}).get("source")
+                except Exception:
+                    source = None
+
+                if db_key_valid and source != "environment":
+                    os.environ[env_key] = provider.api_key.strip()
+                    logger.info(f"  ✓ 使用数据库厂家配置的 {env_key} (长度: {len(provider.api_key)})")
+                    if env_key_valid and existing_env_value.strip() != provider.api_key.strip():
+                        logger.info(f"  ℹ️  已覆盖环境变量中的 {env_key}（以数据库为准）")
                     bridged_count += 1
-                elif provider.api_key and not provider.api_key.startswith("your_"):
-                    # 只有当环境变量不存在或为占位符时，才使用数据库配置
-                    os.environ[env_key] = provider.api_key
+                elif env_key_valid:
+                    logger.info(f"  ✓ 使用环境变量中的 {env_key} (长度: {len(existing_env_value)})")
+                    bridged_count += 1
+                elif db_key_valid:
+                    # 数据库有效，但 source 强制 environment（罕见）：仍用数据库兜底
+                    os.environ[env_key] = provider.api_key.strip()
                     logger.info(f"  ✓ 使用数据库厂家配置的 {env_key} (长度: {len(provider.api_key)})")
                     bridged_count += 1
                 else:
-                    logger.debug(f"  ⏭️  {env_key} 未配置有效的 API Key")
+                    logger.debug(f"  ⏭️  {env_key} 未配置有效的 API Key（db/env均无有效值）")
 
             # 关闭同步客户端
             client.close()

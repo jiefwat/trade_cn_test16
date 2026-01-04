@@ -3,6 +3,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 import os
 import warnings
+from pathlib import Path
+
+# Ensure .env is loaded into process environment for components that rely on os.getenv()
+# (e.g., LLM adapters, API key validators). Pydantic can read env_file, but it does not
+# automatically populate os.environ for other modules.
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    _project_root = Path(__file__).resolve().parents[2]
+    _env_path = _project_root / ".env"
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+    else:
+        # Fallback: search default locations
+        load_dotenv(override=False)
+except Exception:
+    # dotenv is optional; if not installed, rely on OS env vars only.
+    pass
 
 # Legacy env var aliases (deprecated): map API_HOST/PORT/DEBUG -> HOST/PORT/DEBUG
 _LEGACY_ENV_ALIASES = {

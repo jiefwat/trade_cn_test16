@@ -1,0 +1,7 @@
+#!/bin/bash
+TGTDIR=/usr/local
+BASEDIR=/usr/local/share/wkhtmltox-installer
+cd $TGTDIR
+tar ozxf $BASEDIR/wkhtmltox.tar.gz
+mv $BASEDIR/uninstall-wkhtmltox $TGTDIR/bin
+rm -fr $BASEDIR
