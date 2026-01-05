@@ -1197,24 +1197,10 @@ class DataSourceManager:
             cached_data = self._get_cached_data(symbol, start_date, end_date, max_age_hours=24)
             if cached_data is not None and not cached_data.empty:
                 logger.info(f"✅ [缓存命中] 从缓存获取{symbol}数据")
-                # 获取股票基本信息
-                provider = self._get_tushare_adapter()
-                if provider:
-                    import asyncio
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_closed():
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                    except RuntimeError:
-                        # 在线程池中没有事件循环，创建新的
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-
-                    stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
-                    stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
-                else:
-                    stock_name = f'股票{symbol}'
+                # ⚠️ 注意：此方法可能在 FastAPI 的运行事件循环中被调用。
+                # 旧实现使用 loop.run_until_complete() 会触发 "this event loop is already running"。
+                # 缓存命中时没必要额外请求股票信息，直接使用默认名称避免事件循环冲突。
+                stock_name = f'股票{symbol}'
 
                 # 格式化返回
                 return self._format_stock_data_response(cached_data, symbol, stock_name, start_date, end_date)
@@ -1227,26 +1213,40 @@ class DataSourceManager:
             if not provider:
                 return f"❌ Tushare提供器不可用"
 
-            # 使用异步方法获取历史数据
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
+            # 使用异步方法获取历史数据（在线程中创建独立事件循环，避免与 FastAPI 主循环冲突）
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+            def _fetch_tushare(ts_symbol: str, ts_start_date: str, ts_end_date: str):
+                try:
+                    import asyncio
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-            except RuntimeError:
-                # 在线程池中没有事件循环，创建新的
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                    try:
+                        df = loop.run_until_complete(provider.get_historical_data(ts_symbol, ts_start_date, ts_end_date))
+                        info = loop.run_until_complete(provider.get_stock_basic_info(ts_symbol))
+                        return (df, info)
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    return e
 
-            data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch_tushare, symbol, start_date, end_date)
+                try:
+                    result = future.result(timeout=30)
+                except FutureTimeoutError:
+                    logger.error(f"❌ [Tushare] 调用超时: {symbol}")
+                    return f"❌ Tushare获取{symbol}数据失败: 超时"
+
+            if isinstance(result, Exception):
+                raise result
+
+            data, stock_info = result
 
             if data is not None and not data.empty:
                 # 保存到缓存
                 self._save_to_cache(symbol, data, start_date, end_date)
 
-                # 获取股票基本信息（异步）
-                stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
                 stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
                 # 格式化返回
@@ -1278,30 +1278,46 @@ class DataSourceManager:
 
         start_time = time.time()
         try:
-            # 使用AKShare的统一接口
-            from .providers.china.akshare import get_akshare_provider
-            provider = get_akshare_provider()
+            # 🔥 关键修复：
+            # 这里会在 FastAPI 的异步事件循环线程内被调用（例如分析流程/验证流程）。
+            # 旧实现使用 loop.run_until_complete() 直接在运行中的 uvloop 上执行协程，
+            # 会触发 RuntimeError: this event loop is already running.
+            # 参考 _get_baostock_data 的做法：在线程中创建独立事件循环执行异步 provider 调用。
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
-            # 使用异步方法获取历史数据
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
+            def _fetch_akshare(ak_symbol: str, ak_start_date: str, ak_end_date: str, ak_period: str):
+                try:
+                    from .providers.china.akshare import get_akshare_provider
+                    import asyncio
+                    provider = get_akshare_provider()
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-            except RuntimeError:
-                # 在线程池中没有事件循环，创建新的
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                    try:
+                        df = loop.run_until_complete(provider.get_historical_data(ak_symbol, ak_start_date, ak_end_date, ak_period))
+                        info = loop.run_until_complete(provider.get_stock_basic_info(ak_symbol))
+                        return (df, info)
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    return e
 
-            data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date, period))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch_akshare, symbol, start_date, end_date, period)
+                try:
+                    result = future.result(timeout=30)  # 30秒超时
+                except FutureTimeoutError:
+                    logger.error(f"❌ [AKShare] 调用超时: {symbol}")
+                    return f"❌ AKShare获取{symbol}数据失败: 超时"
+
+            if isinstance(result, Exception):
+                raise result
+
+            data, stock_info = result
 
             duration = time.time() - start_time
 
             if data is not None and not data.empty:
                 # 🔧 修复：使用统一的格式化方法，包含技术指标计算
-                # 获取股票基本信息
-                stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
                 stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
                 # 调用统一的格式化方法（包含技术指标计算）
@@ -1678,32 +1694,20 @@ class DataSourceManager:
     def _get_akshare_stock_info(self, symbol: str) -> Dict:
         """使用AKShare获取股票基本信息
 
-        🔥 重要：AKShare 需要区分股票和指数
-        - 对于 000001，如果不加后缀，会被识别为"深圳成指"（指数）
-        - 对于股票，需要使用完整代码（如 sz000001 或 sh600000）
+        说明：
+        - AKShare 的 `stock_individual_info_em` 在本项目的其他位置（`AKShareAdapter.get_daily_basic`）是用 6 位代码调用的；
+          使用带市场前缀（如 `sz000001`）在部分版本/环境下会触发内部 DataFrame 组装异常：
+          `If using all scalar values, you must pass an index`
+        - 因此这里优先使用 6 位代码调用；若失败/为空，再降级用 `stock_info_a_code_name` 查股票简称。
         """
         try:
             import akshare as ak
 
-            # 🔥 转换为 AKShare 格式的股票代码
-            # AKShare 的 stock_individual_info_em 需要使用 "sz000001" 或 "sh600000" 格式
-            if symbol.startswith('6'):
-                # 上海股票：600000 -> sh600000
-                akshare_symbol = f"sh{symbol}"
-            elif symbol.startswith(('0', '3', '2')):
-                # 深圳股票：000001 -> sz000001
-                akshare_symbol = f"sz{symbol}"
-            elif symbol.startswith(('8', '4')):
-                # 北京股票：830000 -> bj830000
-                akshare_symbol = f"bj{symbol}"
-            else:
-                # 其他情况，直接使用原始代码
-                akshare_symbol = symbol
+            # ✅ 优先按 6 位代码调用（与 AKShareAdapter 保持一致）
+            symbol6 = str(symbol).zfill(6)
+            logger.debug(f"📊 [AKShare股票信息] symbol={symbol} -> symbol6={symbol6}")
 
-            logger.debug(f"📊 [AKShare股票信息] 原始代码: {symbol}, AKShare格式: {akshare_symbol}")
-
-            # 尝试获取个股信息
-            stock_info = ak.stock_individual_info_em(symbol=akshare_symbol)
+            stock_info = ak.stock_individual_info_em(symbol=symbol6)
 
             if stock_info is not None and not stock_info.empty:
                 # 转换为字典格式
@@ -1728,10 +1732,35 @@ class DataSourceManager:
                 return info
             else:
                 logger.warning(f"⚠️ [AKShare股票信息] 返回空数据: {symbol}")
+                # 降级：用股票列表接口查名称
+                try:
+                    df = ak.stock_info_a_code_name()
+                    if df is not None and not df.empty:
+                        df = df.rename(columns={'code': 'symbol', '代码': 'symbol', 'name': 'name', '名称': 'name'})
+                        m = df[df['symbol'].astype(str).str.zfill(6) == symbol6]
+                        if not m.empty:
+                            nm = m['name'].iloc[0]
+                            return {'symbol': symbol, 'name': nm, 'source': 'akshare'}
+                except Exception:
+                    pass
                 return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'akshare'}
 
         except Exception as e:
             logger.error(f"❌ [股票信息] AKShare获取失败: {symbol}, 错误: {e}")
+            # 降级：尽量用股票列表接口查名称（避免把异常冒泡到分析流程）
+            try:
+                import akshare as ak
+                symbol6 = str(symbol).zfill(6)
+                df = ak.stock_info_a_code_name()
+                if df is not None and not df.empty:
+                    df = df.rename(columns={'code': 'symbol', '代码': 'symbol', 'name': 'name', '名称': 'name'})
+                    m = df[df['symbol'].astype(str).str.zfill(6) == symbol6]
+                    if not m.empty:
+                        nm = m['name'].iloc[0]
+                        logger.info(f"✅ [AKShare股票信息-降级] {symbol} -> {nm}")
+                        return {'symbol': symbol, 'name': nm, 'source': 'akshare'}
+            except Exception:
+                pass
             return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'akshare', 'error': str(e)}
 
     def _get_baostock_stock_info(self, symbol: str) -> Dict:

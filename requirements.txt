@@ -29,8 +29,8 @@ redis
 chainlit
 rich
 questionary
-langchain_anthropic
-langchain-google-genai>=2.1.12  # 修复 client_options 未定义错误
+langchain-anthropic>=0.3.15
+langchain-google-genai>=2.1.10  # 与项目已验证版本组合对齐（避免依赖回溯/冲突）
 google-genai>=0.1.0
 dashscope
 streamlit

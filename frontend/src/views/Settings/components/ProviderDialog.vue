@@ -238,7 +238,8 @@ const presetProviders = [
     description: '阿里云百炼大模型服务平台，提供通义千问等模型',
     website: 'https://bailian.console.aliyun.com',
     api_doc_url: 'https://help.aliyun.com/zh/dashscope/',
-    default_base_url: 'https://dashscope.aliyuncs.com/api/v1',
+    // DashScope 的 OpenAI 兼容模式 base_url（否则 /chat/completions 会 404）
+    default_base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     supported_features: ['chat', 'completion', 'embedding', 'function_calling', 'streaming'],
     register_url: 'https://account.aliyun.com/register/qr_register.htm',
     register_guide: '如果您还没有阿里云账号，请先注册并开通百炼服务：'

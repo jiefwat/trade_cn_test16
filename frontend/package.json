@@ -4,7 +4,7 @@
   "description": "TradingAgents-CN 现代化前端界面",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node -r ./scripts/node16-crypto-polyfill.cjs ./node_modules/vite/bin/vite.js",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix --ignore-path .gitignore",

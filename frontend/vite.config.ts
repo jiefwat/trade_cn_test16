@@ -43,10 +43,8 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 3000,
     // 允许通过 ngrok 等外网域名访问开发服务器（仅用于开发/临时分享）
-    // 也可用 true 允许所有 Host（更不安全）
-    allowedHosts: [
-      'undelightfully-sketchlike-lacy.ngrok-free.dev'
-    ],
+    // 使用 ngrok 时域名会变化；为避免频繁改配置，这里放开所有 Host（更不安全，仅用于临时环境）
+    allowedHosts: true,
     hmr: {
       overlay: false
     },

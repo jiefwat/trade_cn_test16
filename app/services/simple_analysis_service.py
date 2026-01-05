@@ -164,6 +164,9 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
                         backend_url = _get_default_backend_url(provider)
                         logger.warning(f"⚠️ [同步查询] 厂家 {provider} 没有配置 default_base_url，使用硬编码默认值")
 
+                    # 🔥 修复已知的 DashScope OpenAI 兼容地址误配（/api/v1 会导致 /chat/completions 404）
+                    backend_url = _normalize_backend_url(provider, backend_url)
+
                     client.close()
                     return {
                         "provider": provider,
@@ -207,7 +210,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             client.close()
             return {
                 "provider": provider,
-                "backend_url": backend_url,
+                "backend_url": _normalize_backend_url(provider, backend_url),
                 "api_key": api_key
             }
         except Exception as e:
@@ -216,7 +219,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
         # 最后回退到硬编码的默认 URL 和环境变量 API Key
         return {
             "provider": provider,
-            "backend_url": _get_default_backend_url(provider),
+            "backend_url": _normalize_backend_url(provider, _get_default_backend_url(provider)),
             "api_key": _get_env_api_key_for_provider(provider)
         }
 
@@ -255,7 +258,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             client.close()
             return {
                 "provider": provider,
-                "backend_url": backend_url,
+                "backend_url": _normalize_backend_url(provider, backend_url),
                 "api_key": api_key
             }
         except Exception as e2:
@@ -264,7 +267,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
         # 最后回退到硬编码的默认 URL 和环境变量 API Key
         return {
             "provider": provider,
-            "backend_url": _get_default_backend_url(provider),
+            "backend_url": _normalize_backend_url(provider, _get_default_backend_url(provider)),
             "api_key": _get_env_api_key_for_provider(provider)
         }
 
@@ -314,7 +317,8 @@ def _get_default_backend_url(provider: str) -> str:
     """
     default_urls = {
         "google": "https://generativelanguage.googleapis.com/v1beta",
-        "dashscope": "https://dashscope.aliyuncs.com/api/v1",
+        # DashScope 的 OpenAI 兼容模式基地址（会拼接 /chat/completions 等路径）
+        "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "openai": "https://api.openai.com/v1",
         "deepseek": "https://api.deepseek.com",
         "anthropic": "https://api.anthropic.com",
@@ -326,6 +330,27 @@ def _get_default_backend_url(provider: str) -> str:
     url = default_urls.get(provider, "https://dashscope.aliyuncs.com/compatible-mode/v1")
     logger.info(f"🔧 [默认URL] {provider} -> {url}")
     return url
+
+
+def _normalize_backend_url(provider: str, backend_url: Optional[str]) -> Optional[str]:
+    """对已知供应商的 backend_url 做兼容修正（避免历史配置导致接口 404）。"""
+    if not backend_url:
+        return backend_url
+    p = (provider or "").lower()
+    u = backend_url.strip().rstrip("/")
+
+    # DashScope：如果误配为 /api/v1，则修正为 OpenAI 兼容模式基地址
+    if p == "dashscope":
+        if u == "https://dashscope.aliyuncs.com/api/v1":
+            fixed = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            logger.warning(f"🛠️ [URL修正] dashscope backend_url 从 {backend_url} 修正为 {fixed}")
+            return fixed
+        # 若已经包含 compatible-mode/v1，则截断到基地址（防止误传更深路径）
+        if "dashscope.aliyuncs.com" in u and "/compatible-mode/v1" in u:
+            idx = u.find("/compatible-mode/v1")
+            return u[: idx + len("/compatible-mode/v1")]
+
+    return backend_url
 
 
 def _get_default_provider_by_model(model_name: str) -> str:
@@ -1770,7 +1795,7 @@ class SimpleAnalysisService:
 
             # 5. 最后的备用方案
             if not summary:
-                summary = f"对{request.stock_code}的分析已完成，请查看详细报告。"
+                summary = f"对{request.get_symbol()}的分析已完成，请查看详细报告。"
                 logger.warning(f"⚠️ [SUMMARY] 使用备用摘要")
 
             if not recommendation:
@@ -1781,10 +1806,12 @@ class SimpleAnalysisService:
             model_info = decision.get('model_info', 'Unknown') if isinstance(decision, dict) else 'Unknown'
 
             # 构建结果
+            symbol = request.get_symbol() or "UNKNOWN"
             result = {
                 "analysis_id": str(uuid.uuid4()),
-                "stock_code": request.stock_code,
-                "stock_symbol": request.stock_code,  # 添加stock_symbol字段以保持兼容性
+                # 🔥 兼容：旧字段 stock_code 可能为空，统一用 symbol
+                "stock_code": symbol,
+                "stock_symbol": symbol,  # 添加stock_symbol字段以保持兼容性
                 "analysis_date": analysis_date,
                 "summary": summary,
                 "recommendation": recommendation,
@@ -2719,6 +2746,9 @@ class SimpleAnalysisService:
             from pathlib import Path
             from datetime import datetime
             import json
+
+            # 防御：避免 stock_symbol 为空导致路径拼接崩溃
+            stock_symbol = stock_symbol or result.get("stock_symbol") or result.get("stock_code") or "UNKNOWN"
 
             # 获取项目根目录
             project_root = Path(__file__).parent.parent.parent

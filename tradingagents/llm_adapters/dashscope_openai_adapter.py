@@ -70,6 +70,14 @@ class ChatDashScopeOpenAI(ChatOpenAI):
             logger.info(f"✅ [DashScope初始化] 使用 kwargs 中传入的 API Key（来自数据库配置）")
 
         # 设置 DashScope OpenAI 兼容接口的默认配置
+        # 兼容历史配置：有些旧配置/前端默认值会写成 /api/v1（这不是 OpenAI 兼容路径，调用 /chat/completions 会 404）
+        raw_base_url = (kwargs.get("base_url") or "").strip()
+        if raw_base_url:
+            normalized = raw_base_url.rstrip("/")
+            if normalized == "https://dashscope.aliyuncs.com/api/v1":
+                fixed = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                logger.warning(f"⚠️ [DashScope初始化] 检测到旧 base_url={raw_base_url}，已自动修正为 {fixed}")
+                kwargs["base_url"] = fixed
         kwargs.setdefault("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         kwargs["api_key"] = api_key_from_kwargs  # 🔥 使用验证后的 API Key
         kwargs.setdefault("model", "qwen-turbo")

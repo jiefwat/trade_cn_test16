@@ -44,6 +44,33 @@ class ValidationResult:
 class StartupValidator:
     """启动配置验证器"""
     
+    def _get_config_value(self, key: str) -> str:
+        """
+        获取配置值（优先 os.environ，其次读取 app.core.config.settings）。
+
+        说明：
+        - 线上/容器场景通常通过环境变量注入；
+        - 本地场景常用 `.env`，而 Settings 会通过 `env_file=.env` 读取；
+        - 若未安装 python-dotenv，`.env` 可能不会自动写入 os.environ，
+          但 Settings 仍能读取到配置，因此验证器需要同时兼容两种来源。
+        """
+        value = os.getenv(key, "")
+        if value:
+            return value
+
+        # Fallback to pydantic settings (reads env_file=".env")
+        try:
+            from app.core.config import settings  # local import to avoid import cycles at module import time
+            if hasattr(settings, key):
+                v = getattr(settings, key)
+                if v is None:
+                    return ""
+                return str(v)
+        except Exception:
+            pass
+
+        return ""
+    
     # 必需配置项
     REQUIRED_CONFIGS = [
         ConfigItem(
@@ -184,7 +211,7 @@ class StartupValidator:
     def _validate_required_configs(self):
         """验证必需配置"""
         for config in self.REQUIRED_CONFIGS:
-            value = os.getenv(config.key)
+            value = self._get_config_value(config.key)
             
             if not value:
                 self.result.missing_required.append(config)
@@ -198,7 +225,7 @@ class StartupValidator:
     def _validate_recommended_configs(self):
         """验证推荐配置"""
         for config in self.RECOMMENDED_CONFIGS:
-            value = os.getenv(config.key)
+            value = self._get_config_value(config.key)
 
             if not value:
                 self.result.missing_recommended.append(config)
@@ -213,21 +240,21 @@ class StartupValidator:
     def _check_security_configs(self):
         """检查安全配置"""
         # 检查JWT密钥是否使用默认值
-        jwt_secret = os.getenv("JWT_SECRET", "")
+        jwt_secret = self._get_config_value("JWT_SECRET")
         if jwt_secret in ["change-me-in-production", "your-super-secret-jwt-key-change-in-production"]:
             self.result.warnings.append(
                 "⚠️  JWT_SECRET 使用默认值，生产环境请务必修改！"
             )
         
         # 检查CSRF密钥是否使用默认值
-        csrf_secret = os.getenv("CSRF_SECRET", "")
+        csrf_secret = self._get_config_value("CSRF_SECRET")
         if csrf_secret in ["change-me-csrf-secret", "your-csrf-secret-key-change-in-production"]:
             self.result.warnings.append(
                 "⚠️  CSRF_SECRET 使用默认值，生产环境请务必修改！"
             )
         
         # 检查是否在生产环境使用DEBUG模式
-        debug = os.getenv("DEBUG", "true").lower() in ("true", "1", "yes", "on")
+        debug = self._get_config_value("DEBUG").lower() in ("true", "1", "yes", "on")
         if not debug:
             logger.info("ℹ️  生产环境模式")
         else:
